@@ -111,15 +111,22 @@ func main() {
 
 	chanGit = make(chan struct{}, config.gitMax)
 
-	// Remove duplicate args
+	config.args = flag.Args()
 	if !config.resume {
+		// If resume is disabled then remove duplicate args
 		config.args = unique(flag.Args())
 	} else if flag.NArg() != 1 {
+		// If resume is enabled and there is not exactly one argument
+		// then print an error
 		fmt.Fprintln(
 			os.Stderr,
 			"The flag -resume must be used with a single username")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	if debug {
+		log.Printf("%+v", config)
 	}
 
 	// Ensure the outut directory exists
@@ -204,7 +211,7 @@ func main() {
 					wg2.Add(1)
 					go func() {
 						defer wg2.Done()
-						err := writeGitLogForAuthor(ctx, user)
+						err := writeGitLog(ctx, user)
 						if err != nil {
 							chanErrs <- err
 						}
@@ -234,21 +241,15 @@ func fetchNamedMembers(
 		}()
 
 		// All non-flag arguments are considered GitHub user names.
-		wg.Add(len(config.args))
-		for _, login := range config.args {
-			go func(login string) {
+		for i := 0; i < len(config.args) && ctx.Err() == nil; i++ {
+			wg.Add(1)
+			go func(i int) {
 				defer wg.Done()
 
-				// If the context has been cancelled then do
-				// not process this user. This is handled here
-				// so that the above wg.Done() call gets
-				// invoked and the program doesn't deadlock.
-				if ctx.Err() != nil {
-					return
-				}
+				login := config.args[i]
 
-				// Get the user details.
 				if config.noFetchUsers {
+					// Load the user from the local disk cache.
 					user, err := loadUserFromDisk(login)
 					if err != nil {
 						chanErrs <- err
@@ -256,6 +257,7 @@ func fetchNamedMembers(
 					}
 					chanUsers <- user
 				} else {
+					// Get the user via the GitHub API
 					user, err := getUser(ctx, client, login)
 					if err != nil {
 						chanErrs <- err
@@ -263,7 +265,7 @@ func fetchNamedMembers(
 					}
 					chanUsers <- user
 				}
-			}(login)
+			}(i)
 		}
 	}()
 
@@ -287,43 +289,126 @@ func fetchAllMembers(
 			close(chanErrs)
 		}()
 
+		var (
+			chanLogins     chan string
+			chanLoginsErrs chan error
+		)
+
 		if config.noFetchUsers {
-			matches, err := filepath.Glob(
-				path.Join(config.outputDir, "*"))
-			if err != nil {
-				chanErrs <- err
+			chanLogins, chanLoginsErrs = getCachedLogins(ctx)
+		} else {
+			chanLogins, chanLoginsErrs = fetchMemberLogins(ctx, client)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
 				return
-			}
-			wg.Add(len(matches))
-			for _, m := range matches {
-				go func(m string) {
+			case err, ok := <-chanLoginsErrs:
+				if ok {
+					chanErrs <- err
+				}
+				return
+			case login, ok := <-chanLogins:
+				if !ok {
+					return
+				}
+
+				// If resume mode is enabled then only process
+				// the member if their login name is >= the
+				// first command-line argument
+				if config.resume && login < flag.Arg(0) {
+					continue
+				}
+
+				// Indicate that there is now a user on which to wait
+				wg.Add(1)
+
+				go func(login string) {
 					defer wg.Done()
 
-					login := path.Base(m)
-
-					// If resume mode is enabled then only process
-					// the member if their login name is >= the
-					// first command-line argument
-					if config.resume && login < flag.Arg(0) {
-						return
+					if config.noFetchUsers {
+						// Load the user from the local disk cache.
+						user, err := loadUserFromDisk(login)
+						if err != nil {
+							chanErrs <- err
+							return
+						}
+						chanUsers <- user
+					} else {
+						// Get the user via the GitHub API
+						user, err := getUser(ctx, client, login)
+						if err != nil {
+							chanErrs <- err
+							return
+						}
+						chanUsers <- user
 					}
-
-					user, err := loadUserFromDisk(login)
-					if err != nil {
-						chanErrs <- err
-						return
-					}
-					chanUsers <- user
-				}(m)
+				}(login)
 			}
+		}
+	}()
+
+	return chanUsers, chanErrs
+}
+
+func getCachedLogins(
+	ctx context.Context) (chan string, chan error) {
+
+	var (
+		chanLogins = make(chan string)
+		chanErrs   = make(chan error, 1)
+	)
+
+	go func() {
+		var wg sync.WaitGroup
+		defer func() {
+			wg.Wait()
+			close(chanLogins)
+			close(chanErrs)
+		}()
+
+		matches, err := filepath.Glob(path.Join(config.outputDir, "*"))
+		if err != nil {
+			chanErrs <- err
 			return
 		}
+
+		for i := 0; i < len(matches) && ctx.Err() == nil; i++ {
+			wg.Add(1)
+			go func(i int) {
+				chanLogins <- path.Base(matches[i])
+				wg.Done()
+			}(i)
+		}
+	}()
+
+	return chanLogins, chanErrs
+}
+
+func fetchMemberLogins(
+	ctx context.Context,
+	client *github.Client) (chan string, chan error) {
+
+	var (
+		chanLogins = make(chan string)
+		chanErrs   = make(chan error, 1)
+	)
+
+	go func() {
+		var wg sync.WaitGroup
+		defer func() {
+			wg.Wait()
+			close(chanLogins)
+			close(chanErrs)
+		}()
 
 		// Get all available pages of member data as long as the context
 		// is not cancelled and there are additional pages to retrieve.
 		opts := &github.ListMembersOptions{
 			ListOptions: github.ListOptions{Page: 1},
 		}
+
 		for ctx.Err() == nil && opts.Page > 0 {
 			members, rep, err := client.Organizations.ListMembers(
 				ctx,
@@ -336,48 +421,23 @@ func fetchAllMembers(
 
 			printRateLimit(rep.Rate)
 
-			// Add the users to the wait group.
-			wg.Add(len(members))
-
-			// Start a goroutine to process the members in this page.
-			go func(members []*github.User) {
-				for _, m := range members {
-					// Start a goroutine to process this member.
-					go func(login string) {
-						defer wg.Done()
-
-						// If the context has been cancelled then do
-						// not process this user. This is handled here
-						// so that the above wg.Done() call gets
-						// invoked and the program doesn't deadlock.
-						if ctx.Err() != nil {
-							return
-						}
-
-						// If resume mode is enabled then only process
-						// the member if their login name is >= the
-						// first command-line argument
-						if config.resume && login < flag.Arg(0) {
-							return
-						}
-
-						// Get the user details.
-						user, err := getUser(ctx, client, login)
-						if err != nil {
-							chanErrs <- err
-							return
-						}
-
-						chanUsers <- user
-					}(m.GetLogin())
-				}
-			}(members)
+			for i := 0; i < len(members) && ctx.Err() == nil; i++ {
+				wg.Add(1)
+				go func(i int) {
+					chanLogins <- members[i].GetLogin()
+					wg.Done()
+				}(i)
+			}
 
 			opts.Page = rep.NextPage
 		}
 	}()
 
-	return chanUsers, chanErrs
+	return chanLogins, chanErrs
+}
+
+func writeIssues(ctx context.Context, user *github.User) {
+
 }
 
 func loadUserFromDisk(login string) (*github.User, error) {
@@ -512,7 +572,7 @@ func getGoPath() string {
 	return ""
 }
 
-func writeGitLogForAuthor(
+func writeGitLog(
 	ctx context.Context,
 	user *github.User) error {
 
@@ -592,7 +652,7 @@ func writeGitLogForAuthor(
 
 	// Get the commits for the user's login ID.
 	{
-		commitIDs, err := gitLogForAuthor(ctx, login)
+		commitIDs, err := gitLog(ctx, login)
 		if err != nil {
 			return err
 		}
@@ -604,7 +664,7 @@ func writeGitLogForAuthor(
 	// If the user has a valid e-mail address then get commits for
 	// that too.
 	if email := user.GetEmail(); email != "" {
-		commitIDs, err := gitLogForAuthor(ctx, email)
+		commitIDs, err := gitLog(ctx, email)
 		if err != nil {
 			return err
 		}
@@ -616,7 +676,7 @@ func writeGitLogForAuthor(
 	// If the user has a valid display name then get commits for
 	// that too.
 	if name := user.GetName(); name != "" {
-		commitIDs, err := gitLogForAuthor(ctx, name)
+		commitIDs, err := gitLog(ctx, name)
 		if err != nil {
 			return err
 		}
@@ -628,9 +688,7 @@ func writeGitLogForAuthor(
 	return nil
 }
 
-func gitLogForAuthor(
-	ctx context.Context,
-	author string) ([]string, error) {
+func gitLog(ctx context.Context, author string) ([]string, error) {
 
 	r, done, wait, err := git("log", "--oneline", "--author", author)
 	if err != nil {
