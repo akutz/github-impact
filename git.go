@@ -18,6 +18,9 @@ import (
 	"github.com/google/go-github/github"
 )
 
+// chanGit controls the number of concurrent git commands
+var chanGit chan struct{}
+
 type changesetEntry struct {
 	Add  int    `json:"add"`
 	Del  int    `json:"del"`
@@ -44,9 +47,6 @@ type changesetReport struct {
 	Additions        int       `json:"additions"`
 	Deletions        int       `json:"deletions"`
 }
-
-// Only allow n git operations at a time or the system hangs
-var chanGit chan struct{}
 
 func git(args ...string) (io.Reader, func(), func() error, error) {
 	chanGit <- struct{}{}

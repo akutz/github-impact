@@ -20,26 +20,31 @@ import (
 var (
 	debug, _ = strconv.ParseBool(os.Getenv("DEBUG"))
 
-	// api is the number of allowed, concurrent GitHub API calls
-	api = make(chan struct{}, 2)
+	// chanAPI controls the number of concurrent API calls
+	chanAPI chan struct{}
 )
 
 var config struct {
-	args          []string
-	logLevel      string
-	outputDir     string
-	memberOrg     string
-	targetOrg     string
-	targetRepo    string
-	resume        bool
-	showRateLimit bool
-	targetGitDir  string
-	gitMax        int
-	noGit         bool
-	noFetchIssues bool
-	noFetchUsers  bool
-	utc           bool
-	offline       bool
+	args                []string
+	logLevel            string
+	outputDir           string
+	memberOrg           string
+	targetOrg           string
+	targetRepo          string
+	resume              bool
+	showRateLimit       bool
+	targetGitDir        string
+	gitMax              int
+	noGit               bool
+	noFetchIssues       bool
+	noFetchUsers        bool
+	noFetchPullRequests bool
+	utc                 bool
+	offline             bool
+	apiMax              int
+	apiRetries          int
+	apiWait             time.Duration
+	apiRetryWait        time.Duration
 }
 
 func main() {
@@ -76,6 +81,9 @@ func main() {
 		&config.noFetchIssues, "no-fetch-issues", false,
 		"Do not update local issue cache")
 	flag.BoolVar(
+		&config.noFetchPullRequests, "no-fetch-pull-requests", false,
+		"Do not update local pull request cache")
+	flag.BoolVar(
 		&config.showRateLimit, "show-rate-limit", debug,
 		"Shows the rate limit info after all API calls")
 	flag.BoolVar(
@@ -84,6 +92,27 @@ func main() {
 	flag.BoolVar(
 		&config.offline, "offline", false,
 		"Offline mode sets all -no-fetch flags to true")
+	flag.BoolVar(
+		&config.offline, "no-fetch", false,
+		"Synonym for -offline")
+	flag.BoolVar(
+		&config.offline, "report-only", false,
+		"Synonym for -offline")
+	flag.IntVar(
+		&config.apiMax, "api-max", 2,
+		"Number of max concurrent API calls")
+	flag.IntVar(
+		&config.apiRetries, "api-retries", 5,
+		"Number of retries for a failed API call")
+	var apiWait string
+	flag.StringVar(
+		&apiWait, "api-wait", "1s",
+		"Duration of time to wait between API calls")
+	var apiRetryWait string
+	flag.StringVar(
+		&apiRetryWait, "api-retry-wait", "10s",
+		"Duration of time to wait between failed API calls when the "+
+			"response header \"Retry-After\" is missing")
 
 	// Check to see if the git command is in the path.
 	if exec.Command("git", "version").Run() == nil {
@@ -121,7 +150,25 @@ func main() {
 	// Parse the flags
 	flag.Parse()
 
+	// chanGit controls the number of concurrent git commands
 	chanGit = make(chan struct{}, config.gitMax)
+
+	// chanAPI controls the number of concurrent API calls
+	chanAPI = make(chan struct{}, config.apiMax)
+
+	// Parse the amount of time to wait between API calls.
+	if d, err := time.ParseDuration(apiWait); err != nil {
+		config.apiWait = time.Duration(1) * time.Second
+	} else {
+		config.apiWait = d
+	}
+
+	// Parse the amount of time to wait between failed API calls.
+	if d, err := time.ParseDuration(apiRetryWait); err != nil {
+		config.apiRetryWait = time.Duration(10) * time.Second
+	} else {
+		config.apiRetryWait = d
+	}
 
 	config.args = flag.Args()
 	if !config.resume {
@@ -140,6 +187,7 @@ func main() {
 	if config.offline {
 		config.noFetchUsers = true
 		config.noFetchIssues = true
+		config.noFetchPullRequests = true
 	}
 
 	if debug {
@@ -169,6 +217,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func waitForAPI() {
+	chanAPI <- struct{}{}
+}
+
+func doneWithAPI() {
+	go func() {
+		time.Sleep(config.apiWait)
+		<-chanAPI
+	}()
 }
 
 func printRateLimit(rep *github.Response) {
@@ -266,8 +325,8 @@ func getLoginDirNames() ([]string, error) {
 	return names, nil
 }
 
-func retryAfter(rep *github.Response, max int, cur *int) bool {
-	if *cur > max {
+func retryAfter(rep *github.Response, cur *int) bool {
+	if *cur > config.apiRetries {
 		return false
 	}
 
@@ -280,7 +339,7 @@ func retryAfter(rep *github.Response, max int, cur *int) bool {
 			time.Sleep(time.Duration(secs) * time.Second)
 		}
 	} else if rep.StatusCode == 500 {
-		time.Sleep(time.Duration(10) * time.Second)
+		time.Sleep(config.apiRetryWait)
 	} else {
 		return false
 	}

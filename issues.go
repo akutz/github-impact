@@ -260,16 +260,16 @@ func fetchIssues(
 		retries := 0
 
 		for ctx.Err() == nil && opts.Page > 0 {
-			api <- struct{}{}
+			waitForAPI()
 			issues, rep, err := client.Issues.ListByRepo(
 				ctx,
 				config.targetOrg,
 				config.targetRepo,
 				&opts)
-			<-api
+			doneWithAPI()
 			printRateLimit(rep)
 			if err != nil {
-				if retryAfter(rep, 5, &retries) {
+				if retryAfter(rep, &retries) {
 					continue
 				}
 				chanErrs <- err
@@ -280,18 +280,18 @@ func fetchIssues(
 				wg.Add(1)
 				go func(i int) {
 					issue := &issueWrapper{Issue: *issues[i]}
-					if issue.IsPullRequest() {
+					if !config.noFetchPullRequests && issue.IsPullRequest() {
 						retries := 0
 						for {
-							api <- struct{}{}
+							waitForAPI()
 							pr, rep, err := client.PullRequests.Get(
 								ctx,
 								config.targetOrg,
 								config.targetRepo,
 								issue.GetNumber())
-							<-api
+							doneWithAPI()
 							if err != nil {
-								if retryAfter(rep, 5, &retries) {
+								if retryAfter(rep, &retries) {
 									continue
 								}
 								chanErrs <- err

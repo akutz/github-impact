@@ -213,15 +213,15 @@ func fetchMemberLogins(
 		retries := 0
 
 		for ctx.Err() == nil && opts.Page > 0 {
-			api <- struct{}{}
+			waitForAPI()
 			members, rep, err := client.Organizations.ListMembers(
 				ctx,
 				config.memberOrg,
 				opts)
-			<-api
+			doneWithAPI()
 			printRateLimit(rep)
 			if err != nil {
-				if retryAfter(rep, 5, &retries) {
+				if retryAfter(rep, &retries) {
 					continue
 				}
 				chanErrs <- err
@@ -265,12 +265,12 @@ func getUser(
 
 	retries := 0
 	for {
-		api <- struct{}{}
+		waitForAPI()
 		user, rep, err := client.Users.Get(ctx, login)
-		<-api
+		doneWithAPI()
 		printRateLimit(rep)
 		if err != nil {
-			if retryAfter(rep, 5, &retries) {
+			if retryAfter(rep, &retries) {
 				continue
 			}
 			return nil, err
