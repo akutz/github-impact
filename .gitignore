@@ -2,6 +2,7 @@
 *.out
 *.test
 data
+data.tar.gz
 
 # Created by https://www.gitignore.io
 
