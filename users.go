@@ -210,17 +210,23 @@ func fetchMemberLogins(
 			ListOptions: github.ListOptions{Page: 1},
 		}
 
+		retries := 0
+
 		for ctx.Err() == nil && opts.Page > 0 {
+			api <- struct{}{}
 			members, rep, err := client.Organizations.ListMembers(
 				ctx,
 				config.memberOrg,
 				opts)
+			<-api
+			printRateLimit(rep)
 			if err != nil {
+				if retryAfter(rep, 5, &retries) {
+					continue
+				}
 				chanErrs <- err
 				return
 			}
-
-			printRateLimit(rep.Rate)
 
 			for i := 0; i < len(members) && ctx.Err() == nil; i++ {
 				wg.Add(1)
@@ -257,12 +263,21 @@ func getUser(
 	client *github.Client,
 	login string) (*github.User, error) {
 
-	user, rep, err := client.Users.Get(ctx, login)
-	if err != nil {
-		return nil, err
+	retries := 0
+	for {
+		api <- struct{}{}
+		user, rep, err := client.Users.Get(ctx, login)
+		<-api
+		printRateLimit(rep)
+		if err != nil {
+			if retryAfter(rep, 5, &retries) {
+				continue
+			}
+			return nil, err
+		}
+		return user, nil
 	}
-	printRateLimit(rep.Rate)
-	return user, nil
+
 }
 
 func writeUser(user *github.User) error {

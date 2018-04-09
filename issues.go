@@ -255,38 +255,51 @@ func fetchIssues(
 		}()
 
 		opts.Page = 1
-		opts.Sort = "created"
 		opts.State = "all"
-		opts.Direction = "asc"
+
+		retries := 0
 
 		for ctx.Err() == nil && opts.Page > 0 {
+			api <- struct{}{}
 			issues, rep, err := client.Issues.ListByRepo(
 				ctx,
 				config.targetOrg,
 				config.targetRepo,
 				&opts)
+			<-api
+			printRateLimit(rep)
 			if err != nil {
+				if retryAfter(rep, 5, &retries) {
+					continue
+				}
 				chanErrs <- err
 				return
 			}
-
-			printRateLimit(rep.Rate)
 
 			for i := 0; i < len(issues) && ctx.Err() == nil; i++ {
 				wg.Add(1)
 				go func(i int) {
 					issue := &issueWrapper{Issue: *issues[i]}
 					if issue.IsPullRequest() {
-						pr, _, err := client.PullRequests.Get(
-							ctx,
-							config.targetOrg,
-							config.targetRepo,
-							issue.GetNumber())
-						if err != nil {
-							chanErrs <- err
-							return
+						retries := 0
+						for {
+							api <- struct{}{}
+							pr, rep, err := client.PullRequests.Get(
+								ctx,
+								config.targetOrg,
+								config.targetRepo,
+								issue.GetNumber())
+							<-api
+							if err != nil {
+								if retryAfter(rep, 5, &retries) {
+									continue
+								}
+								chanErrs <- err
+								return
+							}
+							issue.MergedAt = pr.MergedAt
+							break
 						}
-						issue.MergedAt = pr.MergedAt
 					}
 					chanIssues <- issue
 					wg.Done()

@@ -17,7 +17,12 @@ import (
 	"golang.org/x/oauth2"
 )
 
-var debug, _ = strconv.ParseBool(os.Getenv("DEBUG"))
+var (
+	debug, _ = strconv.ParseBool(os.Getenv("DEBUG"))
+
+	// api is the number of allowed, concurrent GitHub API calls
+	api = make(chan struct{}, 2)
+)
 
 var config struct {
 	args          []string
@@ -166,9 +171,9 @@ func main() {
 	}
 }
 
-func printRateLimit(rate github.Rate) {
-	if config.showRateLimit {
-		fmt.Fprintln(os.Stderr, formatRateReset(rate))
+func printRateLimit(rep *github.Response) {
+	if rep != nil && config.showRateLimit {
+		fmt.Fprintln(os.Stderr, formatRateReset(rep.Rate))
 	}
 }
 
@@ -259,6 +264,29 @@ func getLoginDirNames() ([]string, error) {
 		names[i] = path.Base(path.Dir(matches[i]))
 	}
 	return names, nil
+}
+
+func retryAfter(rep *github.Response, max int, cur *int) bool {
+	if *cur > max {
+		return false
+	}
+
+	if rep == nil {
+		return false
+	}
+
+	if v := rep.Header["Retry-After"]; len(v) > 0 {
+		if secs, _ := strconv.Atoi(v[0]); secs > 0 {
+			time.Sleep(time.Duration(secs) * time.Second)
+		}
+	} else if rep.StatusCode == 500 {
+		time.Sleep(time.Duration(10) * time.Second)
+	} else {
+		return false
+	}
+
+	*cur++
+	return true
 }
 
 func usage() {
