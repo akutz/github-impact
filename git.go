@@ -116,16 +116,17 @@ func writeGitLog(
 	}
 
 	os.MkdirAll(dirPath, 0755)
-	csr := changesetReport{
+
+	report := changesetReport{
 		AuthorName:  name,
 		AuthorEmail: email,
 	}
 	for _, cur := range changesets {
-		csr.Additions = csr.Additions + cur.Additions
-		csr.Deletions = csr.Deletions + cur.Deletions
-		if v := cur.AuthorDate; v.After(csr.LatestCommitDate) {
-			csr.LatestCommitSHA = cur.Long
-			csr.LatestCommitDate = v
+		report.Additions = report.Additions + cur.Additions
+		report.Deletions = report.Deletions + cur.Deletions
+		if v := cur.AuthorDate; v.After(report.LatestCommitDate) {
+			report.LatestCommitSHA = cur.Long
+			report.LatestCommitDate = v
 		}
 
 		fileName := fmt.Sprintf("%s.json", cur.Short)
@@ -151,11 +152,7 @@ func writeGitLog(
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(csr); err != nil {
-		return err
-	}
-
-	return nil
+	return enc.Encode(report)
 }
 
 // gitChangesets returns the changesets for an author

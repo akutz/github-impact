@@ -12,12 +12,6 @@ import (
 	"time"
 )
 
-type issueReport struct {
-	Opened    int `json:"opened,omitempty"`
-	Assigned  int `json:"assigned,omitempty"`
-	Mentioned int `json:"mentioned,omitempty"`
-}
-
 type reportEntry struct {
 	Login            string      `json:"login,omitempty"`
 	Name             string      `json:"name,omitempty"`
@@ -43,12 +37,13 @@ func (r reportEntry) fields() []string {
 		strconv.Itoa(r.Deletions),
 		r.LatestCommitSHA,
 		latestCommitDate,
-		strconv.Itoa(r.Issues.Opened),
+		strconv.Itoa(r.Issues.Created),
 		strconv.Itoa(r.Issues.Assigned),
 		strconv.Itoa(r.Issues.Mentioned),
-		strconv.Itoa(r.PullRequests.Opened),
+		strconv.Itoa(r.PullRequests.Created),
 		strconv.Itoa(r.PullRequests.Assigned),
 		strconv.Itoa(r.PullRequests.Mentioned),
+		strconv.Itoa(r.PullRequests.Merged),
 	}
 }
 
@@ -60,12 +55,13 @@ var csvReportHeader = []string{
 	"deletions",
 	"latestCommitSHA",
 	"latestCommitDate",
-	"issuesOpened",
+	"issuesCreated",
 	"issuesAssigned",
 	"issuesMentioned",
-	"pullRequestsOpened",
+	"pullRequestsCreated",
 	"pullRequestsAssigned",
 	"pullRequestsMentioned",
+	"pullRequestsMerged",
 }
 
 func generateReport(

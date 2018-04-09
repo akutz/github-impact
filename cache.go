@@ -68,6 +68,16 @@ func updateLocalCache(
 						}()
 					}
 
+					// Write the issue details for the user
+					wg2.Add(1)
+					go func() {
+						defer wg2.Done()
+						err := writeIssueLog(ctx, client, user)
+						if err != nil {
+							chanErrs <- err
+						}
+					}()
+
 					// Write the git log details for the user
 					if !config.noGit {
 						wg2.Add(1)
@@ -89,8 +99,17 @@ func updateLocalCache(
 						Email: user.GetEmail(),
 					}
 
-					updateEntryWithChangesetTotals(&entry, chanErrs)
+					wg2.Add(2)
+					go func() {
+						updateEntryWithIssueReport(&entry, chanErrs)
+						wg2.Done()
+					}()
+					go func() {
+						updateEntryWithChangesetReport(&entry, chanErrs)
+						wg2.Done()
+					}()
 
+					wg2.Wait()
 					chanEntries <- entry
 				}(user)
 			}
@@ -100,37 +119,64 @@ func updateLocalCache(
 	return chanEntries, chanErrs
 }
 
-func updateEntryWithChangesetTotals(
+func updateEntryWithChangesetReport(
 	entry *reportEntry, chanErrs chan error) {
 
-	changesetTotalsPath := path.Join(
-		config.outputDir, entry.Login,
-		"commits", "data.json")
-	if ok, err := fileExists(changesetTotalsPath); !ok {
+	filePath := path.Join(config.outputDir, entry.Login, "commits", "data.json")
+	if ok, err := fileExists(filePath); !ok {
 		if err != nil {
 			chanErrs <- err
+			return
 		}
 		return
 	}
 
-	// Open the changeset totals file.
-	f, err := os.Open(changesetTotalsPath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		chanErrs <- err
 		return
 	}
 	defer f.Close()
 	dec := json.NewDecoder(f)
-	var csr changesetReport
-	if err := dec.Decode(&csr); err != nil {
+	var report changesetReport
+	if err := dec.Decode(&report); err != nil {
 		chanErrs <- err
 		return
 	}
 
-	entry.Additions = csr.Additions
-	entry.Deletions = csr.Deletions
-	entry.LatestCommitSHA = csr.LatestCommitSHA
-	if !csr.LatestCommitDate.IsZero() {
-		entry.LatestCommitDate = &csr.LatestCommitDate
+	entry.Additions = report.Additions
+	entry.Deletions = report.Deletions
+	entry.LatestCommitSHA = report.LatestCommitSHA
+	if !report.LatestCommitDate.IsZero() {
+		entry.LatestCommitDate = &report.LatestCommitDate
 	}
+}
+
+func updateEntryWithIssueReport(
+	entry *reportEntry, chanErrs chan error) {
+
+	filePath := path.Join(config.outputDir, entry.Login, "issues", "data.json")
+	if ok, err := fileExists(filePath); !ok {
+		if err != nil {
+			chanErrs <- err
+			return
+		}
+		return
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		chanErrs <- err
+		return
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	var report issueAndPullRequestReport
+	if err := dec.Decode(&report); err != nil {
+		chanErrs <- err
+		return
+	}
+
+	entry.Issues = report.Issues
+	entry.PullRequests = report.PullRequests
 }

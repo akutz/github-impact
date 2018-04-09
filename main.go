@@ -68,6 +68,9 @@ func main() {
 		&config.noFetchUsers, "no-fetch-users", false,
 		"Do not update local user cache")
 	flag.BoolVar(
+		&config.noFetchIssues, "no-fetch-issues", false,
+		"Do not update local issue cache")
+	flag.BoolVar(
 		&config.showRateLimit, "show-rate-limit", debug,
 		"Shows the rate limit info after all API calls")
 	flag.BoolVar(
