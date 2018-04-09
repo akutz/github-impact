@@ -48,5 +48,5 @@ usernames that are less than (using default string comparison) the
 username specified on the command line:
 
 ```shell
-$ GITHUB_API_KEY=ABC123 github-impact zjs
+$ GITHUB_API_KEY=ABC123 github-impact -resume zjs
 ```
