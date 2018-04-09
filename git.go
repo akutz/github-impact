@@ -12,6 +12,7 @@ import (
 	"path"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/go-github/github"
@@ -35,7 +36,7 @@ type changeset struct {
 	Changes     []changesetEntry `json:"changes"`
 }
 
-type changesetTotals struct {
+type changesetReport struct {
 	AuthorName       string    `json:"authorName,omitempty"`
 	AuthorEmail      string    `json:"authorEmail,omitempty"`
 	LatestCommitSHA  string    `json:"latestCommitSHA"`
@@ -87,15 +88,19 @@ func writeGitLog(
 
 	// Get the changesets for the user with information starting
 	// with the most specific to the least specific.
-	if err := gitChangesets(ctx, login, login, changesets); err != nil {
-		return err
-	}
 	if email != "" {
 		if err := gitChangesets(ctx, login, email, changesets); err != nil {
 			return err
 		}
 	}
-	if name != "" {
+	//if err := gitChangesets(ctx, login, login, changesets); err != nil {
+	//	return err
+	//}
+
+	// Because searching on a name is fuzzy at best, the name must be at
+	// least eight characters long and include a space to indicate a first
+	// and last name is present.
+	if len(name) >= 8 && strings.Contains(name, " ") {
 		if err := gitChangesets(ctx, login, name, changesets); err != nil {
 			return err
 		}
@@ -111,16 +116,16 @@ func writeGitLog(
 	}
 
 	os.MkdirAll(dirPath, 0755)
-	summary := changesetTotals{
+	csr := changesetReport{
 		AuthorName:  name,
 		AuthorEmail: email,
 	}
 	for _, cur := range changesets {
-		summary.Additions = summary.Additions + cur.Additions
-		summary.Deletions = summary.Deletions + cur.Deletions
-		if v := cur.AuthorDate; v.After(summary.LatestCommitDate) {
-			summary.LatestCommitSHA = cur.Long
-			summary.LatestCommitDate = v
+		csr.Additions = csr.Additions + cur.Additions
+		csr.Deletions = csr.Deletions + cur.Deletions
+		if v := cur.AuthorDate; v.After(csr.LatestCommitDate) {
+			csr.LatestCommitSHA = cur.Long
+			csr.LatestCommitDate = v
 		}
 
 		fileName := fmt.Sprintf("%s.json", cur.Short)
@@ -146,7 +151,7 @@ func writeGitLog(
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(summary); err != nil {
+	if err := enc.Encode(csr); err != nil {
 		return err
 	}
 
@@ -206,6 +211,9 @@ func gitChangesets(
 		scan.Scan()
 		epoch, _ := strconv.ParseInt(scan.Text(), 10, 64)
 		cur.AuthorDate = time.Unix(epoch, 0)
+		if config.utc {
+			cur.AuthorDate = cur.AuthorDate.UTC()
+		}
 
 		// Advance to the next line. This may or may not be the
 		// next commit. The issue is when additions/deletions are

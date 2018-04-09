@@ -33,6 +33,8 @@ var config struct {
 	noGit         bool
 	noFetchIssues bool
 	noFetchUsers  bool
+	utc           bool
+	offline       bool
 }
 
 func main() {
@@ -68,6 +70,12 @@ func main() {
 	flag.BoolVar(
 		&config.showRateLimit, "show-rate-limit", debug,
 		"Shows the rate limit info after all API calls")
+	flag.BoolVar(
+		&config.utc, "utc", false,
+		"Print timestamps using UTC")
+	flag.BoolVar(
+		&config.offline, "offline", false,
+		"Offline mode sets all -no-fetch flags to true")
 
 	// Check to see if the git command is in the path.
 	if exec.Command("git", "version").Run() == nil {
@@ -119,6 +127,11 @@ func main() {
 			"The flag -resume must be used with a single username")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	if config.offline {
+		config.noFetchUsers = true
+		config.noFetchIssues = true
 	}
 
 	if debug {

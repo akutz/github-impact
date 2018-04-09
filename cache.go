@@ -121,16 +121,16 @@ func updateEntryWithChangesetTotals(
 	}
 	defer f.Close()
 	dec := json.NewDecoder(f)
-	var cst changesetTotals
-	if err := dec.Decode(&cst); err != nil {
+	var csr changesetReport
+	if err := dec.Decode(&csr); err != nil {
 		chanErrs <- err
 		return
 	}
 
-	entry.Additions = cst.Additions
-	entry.Deletions = cst.Deletions
-	entry.LatestCommitSHA = cst.LatestCommitSHA
-	if !cst.LatestCommitDate.IsZero() {
-		entry.LatestCommitDate = &cst.LatestCommitDate
+	entry.Additions = csr.Additions
+	entry.Deletions = csr.Deletions
+	entry.LatestCommitSHA = csr.LatestCommitSHA
+	if !csr.LatestCommitDate.IsZero() {
+		entry.LatestCommitDate = &csr.LatestCommitDate
 	}
 }
