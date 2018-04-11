@@ -46,7 +46,7 @@ func (i issueAndPullRequestReport) hasIssues() bool {
 func writeIssueLog(
 	ctx context.Context,
 	client *github.Client,
-	user *github.User) error {
+	user *userWrapper) error {
 
 	var (
 		report         issueAndPullRequestReport

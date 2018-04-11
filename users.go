@@ -9,28 +9,38 @@ import (
 	"sync"
 
 	"github.com/google/go-github/github"
+	ldap "gopkg.in/ldap.v2"
 )
+
+type userWrapper struct {
+	github.User
+	Emails []string `json:"emails,omitempty"`
+}
 
 func getMembers(
 	ctx context.Context,
-	client *github.Client) (chan *github.User, chan error) {
+	githubClient *github.Client,
+	ldapClient ldap.Client,
+	affiliates map[string]*devAffiliation) (chan *userWrapper, chan error) {
 
 	// If there are non-flag arguments and resume is disabled then
 	// return the user details for the specified usernames only.
 	// Otherwise return all users.
 	if len(config.args) > 0 && !config.resume {
-		return getNamedMembers(ctx, client)
+		return getNamedMembers(ctx, githubClient, ldapClient, affiliates)
 	}
 
-	return getAllMembers(ctx, client)
+	return getAllMembers(ctx, githubClient, ldapClient, affiliates)
 }
 
 func getNamedMembers(
 	ctx context.Context,
-	client *github.Client) (chan *github.User, chan error) {
+	githubClient *github.Client,
+	ldapClient ldap.Client,
+	affiliates map[string]*devAffiliation) (chan *userWrapper, chan error) {
 
 	var (
-		chanUsers = make(chan *github.User)
+		chanUsers = make(chan *userWrapper)
 		chanErrs  = make(chan error, 1)
 	)
 
@@ -47,26 +57,14 @@ func getNamedMembers(
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-
 				login := config.args[i]
-
-				if config.noFetchUsers {
-					// Load the user from the local disk cache.
-					user, err := loadUserFromDisk(login)
-					if err != nil {
-						chanErrs <- err
-						return
-					}
-					chanUsers <- user
-				} else {
-					// Get the user via the GitHub API
-					user, err := getUser(ctx, client, login)
-					if err != nil {
-						chanErrs <- err
-						return
-					}
-					chanUsers <- user
+				user, err := loadOrGetUser(
+					ctx, githubClient, ldapClient, affiliates, login)
+				if err != nil {
+					chanErrs <- err
+					return
 				}
+				chanUsers <- user
 			}(i)
 		}
 	}()
@@ -76,10 +74,12 @@ func getNamedMembers(
 
 func getAllMembers(
 	ctx context.Context,
-	client *github.Client) (chan *github.User, chan error) {
+	githubClient *github.Client,
+	ldapClient ldap.Client,
+	affiliates map[string]*devAffiliation) (chan *userWrapper, chan error) {
 
 	var (
-		chanUsers = make(chan *github.User)
+		chanUsers = make(chan *userWrapper)
 		chanErrs  = make(chan error, 1)
 	)
 
@@ -99,7 +99,7 @@ func getAllMembers(
 		if config.noFetchUsers {
 			chanLogins, chanLoginsErrs = getCachedLogins(ctx)
 		} else {
-			chanLogins, chanLoginsErrs = fetchMemberLogins(ctx, client)
+			chanLogins, chanLoginsErrs = fetchMemberLogins(ctx, githubClient)
 		}
 
 		for {
@@ -128,30 +128,51 @@ func getAllMembers(
 
 				go func(login string) {
 					defer wg.Done()
-
-					if config.noFetchUsers {
-						// Load the user from the local disk cache.
-						user, err := loadUserFromDisk(login)
-						if err != nil {
-							chanErrs <- err
-							return
-						}
-						chanUsers <- user
-					} else {
-						// Get the user via the GitHub API
-						user, err := getUser(ctx, client, login)
-						if err != nil {
-							chanErrs <- err
-							return
-						}
-						chanUsers <- user
+					user, err := loadOrGetUser(
+						ctx, githubClient, ldapClient, affiliates, login)
+					if err != nil {
+						chanErrs <- err
+						return
 					}
+					chanUsers <- user
 				}(login)
 			}
 		}
 	}()
 
 	return chanUsers, chanErrs
+}
+
+func loadOrGetUser(
+	ctx context.Context,
+	githubClient *github.Client,
+	ldapClient ldap.Client,
+	affiliates map[string]*devAffiliation,
+	login string) (user *userWrapper, err error) {
+
+	if config.noFetchUsers {
+		// Load the user from the local disk cache.
+		user, err = loadUserFromDisk(login)
+	} else {
+		// Get the user via the GitHub API
+		user, err = getUser(ctx, githubClient, login)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	user.Emails = []string{}
+	knownEmails := map[string]struct{}{}
+
+	supplementWithAffiliates(user, knownEmails, affiliates)
+
+	if err := supplementWithLDAP(
+		ctx, ldapClient, user, knownEmails); err != nil {
+		return nil, err
+	}
+
+	return
 }
 
 func getCachedLogins(
@@ -243,7 +264,7 @@ func fetchMemberLogins(
 	return chanLogins, chanErrs
 }
 
-func loadUserFromDisk(login string) (*github.User, error) {
+func loadUserFromDisk(login string) (*userWrapper, error) {
 	filePath := path.Join(config.outputDir, login, "data.json")
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -251,7 +272,7 @@ func loadUserFromDisk(login string) (*github.User, error) {
 	}
 	defer f.Close()
 	dec := json.NewDecoder(f)
-	var user github.User
+	var user userWrapper
 	if err := dec.Decode(&user); err != nil {
 		return nil, err
 	}
@@ -261,7 +282,7 @@ func loadUserFromDisk(login string) (*github.User, error) {
 func getUser(
 	ctx context.Context,
 	client *github.Client,
-	login string) (*github.User, error) {
+	login string) (*userWrapper, error) {
 
 	retries := 0
 	for {
@@ -275,12 +296,12 @@ func getUser(
 			}
 			return nil, err
 		}
-		return user, nil
+		return &userWrapper{User: *user}, nil
 	}
 
 }
 
-func writeUser(user *github.User) error {
+func writeUser(user *userWrapper) error {
 	// Ensure the user's directory exists.
 	dirPath := path.Join(config.outputDir, user.GetLogin())
 	os.MkdirAll(dirPath, 0755)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,7 +16,8 @@ import (
 type reportEntry struct {
 	Login            string      `json:"login,omitempty"`
 	Name             string      `json:"name,omitempty"`
-	Email            string      `json:"email,omitempty"`
+	Emails           []string    `json:"emails,omitempty"`
+	Commits          int         `json:"commits,omitempty"`
 	Additions        int         `json:"additions,omitempty"`
 	Deletions        int         `json:"deletions,omitempty"`
 	LatestCommitSHA  string      `json:"latestCommitSHA,omitempty"`
@@ -32,7 +34,8 @@ func (r reportEntry) fields() []string {
 	return []string{
 		r.Login,
 		r.Name,
-		r.Email,
+		strings.Join(r.Emails, "|"),
+		strconv.Itoa(r.Commits),
 		strconv.Itoa(r.Additions),
 		strconv.Itoa(r.Deletions),
 		r.LatestCommitSHA,
@@ -50,7 +53,8 @@ func (r reportEntry) fields() []string {
 var csvReportHeader = []string{
 	"login",
 	"name",
-	"email",
+	"emails",
+	"commits",
 	"additions",
 	"deletions",
 	"latestCommitSHA",

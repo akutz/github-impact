@@ -3,6 +3,7 @@
 *.test
 data
 data.tar.gz
+.developers_affiliations.txt
 
 # Created by https://www.gitignore.io
 

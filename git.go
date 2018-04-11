@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/google/go-github/github"
 )
 
 // chanGit controls the number of concurrent git commands
@@ -44,6 +42,7 @@ type changesetReport struct {
 	AuthorEmail      string    `json:"authorEmail,omitempty"`
 	LatestCommitSHA  string    `json:"latestCommitSHA"`
 	LatestCommitDate time.Time `json:"latestCommitDate"`
+	Commits          int       `json:"commits"`
 	Additions        int       `json:"additions"`
 	Deletions        int       `json:"deletions"`
 }
@@ -77,7 +76,7 @@ func git(args ...string) (io.Reader, func(), func() error, error) {
 
 func writeGitLog(
 	ctx context.Context,
-	user *github.User) error {
+	user *userWrapper) error {
 
 	var (
 		login      = user.GetLogin()
@@ -88,14 +87,11 @@ func writeGitLog(
 
 	// Get the changesets for the user with information starting
 	// with the most specific to the least specific.
-	if email != "" {
+	for _, email := range user.Emails {
 		if err := gitChangesets(ctx, login, email, changesets); err != nil {
 			return err
 		}
 	}
-	//if err := gitChangesets(ctx, login, login, changesets); err != nil {
-	//	return err
-	//}
 
 	// Because searching on a name is fuzzy at best, the name must be at
 	// least eight characters long and include a space to indicate a first
@@ -122,6 +118,7 @@ func writeGitLog(
 		AuthorEmail: email,
 	}
 	for _, cur := range changesets {
+		report.Commits++
 		report.Additions = report.Additions + cur.Additions
 		report.Deletions = report.Deletions + cur.Deletions
 		if v := cur.AuthorDate; v.After(report.LatestCommitDate) {

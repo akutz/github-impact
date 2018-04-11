@@ -8,11 +8,13 @@ import (
 	"sync"
 
 	"github.com/google/go-github/github"
+	ldap "gopkg.in/ldap.v2"
 )
 
 func updateLocalCache(
 	ctx context.Context,
-	client *github.Client) (chan reportEntry, chan error) {
+	githubClient *github.Client,
+	ldapClient ldap.Client) (chan reportEntry, chan error) {
 
 	var (
 		chanEntries = make(chan reportEntry)
@@ -23,8 +25,16 @@ func updateLocalCache(
 		defer close(chanEntries)
 		defer close(chanErrs)
 
+		// Get the dev affiliates.
+		_, devAffiliates, err := getDevAffiliations(ctx)
+		if err != nil {
+			chanErrs <- err
+			return
+		}
+
 		// Get the members.
-		chanUsers, chanUsersErrs := getMembers(ctx, client)
+		chanUsers, chanUsersErrs := getMembers(
+			ctx, githubClient, ldapClient, devAffiliates)
 
 		// wg waits on all pending user operations to complete before
 		// exiting the program
@@ -49,7 +59,7 @@ func updateLocalCache(
 
 				wg.Add(1)
 
-				go func(user *github.User) {
+				go func(user *userWrapper) {
 					defer wg.Done()
 
 					// wg2 waits on all operations for *this* user to
@@ -72,7 +82,7 @@ func updateLocalCache(
 					wg2.Add(1)
 					go func() {
 						defer wg2.Done()
-						err := writeIssueLog(ctx, client, user)
+						err := writeIssueLog(ctx, githubClient, user)
 						if err != nil {
 							chanErrs <- err
 						}
@@ -94,9 +104,9 @@ func updateLocalCache(
 
 					// Transform the user into a report entry.
 					entry := reportEntry{
-						Login: user.GetLogin(),
-						Name:  user.GetName(),
-						Email: user.GetEmail(),
+						Login:  user.GetLogin(),
+						Name:   user.GetName(),
+						Emails: user.Emails,
 					}
 
 					wg2.Add(2)
@@ -144,6 +154,7 @@ func updateEntryWithChangesetReport(
 		return
 	}
 
+	entry.Commits = report.Commits
 	entry.Additions = report.Additions
 	entry.Deletions = report.Deletions
 	entry.LatestCommitSHA = report.LatestCommitSHA

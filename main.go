@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/go-github/github"
 	"golang.org/x/oauth2"
+	ldap "gopkg.in/ldap.v2"
 )
 
 var (
@@ -26,7 +27,6 @@ var (
 
 var config struct {
 	args                []string
-	logLevel            string
 	outputDir           string
 	memberOrg           string
 	targetOrg           string
@@ -39,28 +39,34 @@ var config struct {
 	noFetchIssues       bool
 	noFetchUsers        bool
 	noFetchPullRequests bool
+	noFetchAffiliations bool
 	utc                 bool
 	offline             bool
 	apiMax              int
 	apiRetries          int
 	apiWait             time.Duration
 	apiRetryWait        time.Duration
+	ldap                bool
+	ldapHost            string
+	ldapInsecureTLS     bool
 }
 
 func main() {
 	flag.Usage = usage
 
-	// Parse the GitHub API key.
-	githubAPIKey := os.Getenv("GITHUB_API_KEY")
-	if githubAPIKey == "" {
-		fmt.Fprintln(os.Stderr, "GITHUB_API_KEY required")
-		os.Exit(1)
-	}
-
 	// Set up the flags
 	flag.StringVar(
 		&config.outputDir, "output", "data",
 		"The output directory")
+	flag.StringVar(
+		&config.ldapHost, "ldap-host", "SCROOTDC01.vmware.com:3269",
+		"The LDAP host used to supplement e-mail addresses")
+	flag.BoolVar(
+		&config.ldap, "ldap", false,
+		"Enable LDAP lookups")
+	flag.BoolVar(
+		&config.ldapInsecureTLS, "ldap-tls-insecure", false,
+		"Enable LDAP TLS insecure mode")
 	flag.StringVar(
 		&config.memberOrg, "member-org", "vmware",
 		"The source GitHub org")
@@ -83,6 +89,10 @@ func main() {
 	flag.BoolVar(
 		&config.noFetchPullRequests, "no-fetch-pull-requests", false,
 		"Do not update local pull request cache")
+	flag.BoolVar(
+		&config.noFetchAffiliations, "no-fetch-dev-affiliations", false,
+		"Do not update the local developer affiliations file "+
+			"(https://goo.gl/ux4PVs)")
 	flag.BoolVar(
 		&config.showRateLimit, "show-rate-limit", debug,
 		"Shows the rate limit info after all API calls")
@@ -150,6 +160,39 @@ func main() {
 	// Parse the flags
 	flag.Parse()
 
+	// Create the program's context
+	ctx := context.Background()
+
+	// Create the github API client.
+	var githubClient *github.Client
+	if !config.offline {
+		// Parse the GitHub API key.
+		apiKey := os.Getenv("GITHUB_API_KEY")
+		if apiKey == "" {
+			fmt.Fprintln(os.Stderr, "GITHUB_API_KEY required")
+			os.Exit(1)
+		}
+		githubClient = newGitHubAPIClient(ctx, apiKey)
+	}
+
+	// Create the ldap client.
+	var ldapClient ldap.Client
+	if config.ldap {
+		ldapUser := os.Getenv("LDAP_USER")
+		ldapPass := os.Getenv("LDAP_PASS")
+		if ldapUser == "" || ldapPass == "" {
+			fmt.Fprintln(os.Stderr, "LDAP_USER & LDAP_PASS required")
+			os.Exit(1)
+		}
+		client, err := ldapBind(ctx, ldapUser, ldapPass)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		defer client.Close()
+		ldapClient = client
+	}
+
 	// chanGit controls the number of concurrent git commands
 	chanGit = make(chan struct{}, config.gitMax)
 
@@ -185,6 +228,7 @@ func main() {
 	}
 
 	if config.offline {
+		config.ldap = false
 		config.noFetchUsers = true
 		config.noFetchIssues = true
 		config.noFetchPullRequests = true
@@ -197,26 +241,26 @@ func main() {
 	// Ensure the outut directory exists
 	os.MkdirAll(config.outputDir, 0755)
 
-	// Create a new token source.
-	tokenSource := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: githubAPIKey},
-	)
-
-	// Create a new Oauth2 client
-	ctx := context.Background()
-	oauth2Client := oauth2.NewClient(ctx, tokenSource)
-
-	// Create a new GitHub client.
-	client := github.NewClient(oauth2Client)
-
 	// Start updating the local cache.
-	chanEntries, chanErrs := updateLocalCache(ctx, client)
+	chanEntries, chanErrs := updateLocalCache(ctx, githubClient, ldapClient)
 
 	// Begin generating the reports with the local cache channels.
 	if err := generateReport(ctx, chanEntries, chanErrs); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newGitHubAPIClient(ctx context.Context, apiKey string) *github.Client {
+
+	// Create a new token source.
+	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: apiKey})
+
+	// Create a new Oauth2 client
+	oauth2Client := oauth2.NewClient(ctx, tokenSource)
+
+	// Create a new GitHub client.
+	return github.NewClient(oauth2Client)
 }
 
 func waitForAPI() {

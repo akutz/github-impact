@@ -51,9 +51,21 @@
   revision = "150dc57a1b433e64154302bdc40b6bb8aefa313a"
   version = "v1.0.0"
 
+[[projects]]
+  name = "gopkg.in/asn1-ber.v1"
+  packages = ["."]
+  revision = "379148ca0225df7a432012b8df0355c2a2063ac0"
+  version = "v1.2"
+
+[[projects]]
+  name = "gopkg.in/ldap.v2"
+  packages = ["."]
+  revision = "bb7a9ca6e4fbc2129e3db588a34bc970ffe811a9"
+  version = "v2.5.1"
+
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "4300090d6457f26397d5d50caf95d340a2c66eb9a5f91e8d3360348630b030e1"
+  inputs-digest = "5eff34d1dd32ddcb01f5d3c4a5044e913f983c8ade5ef85523061a8bc7f70436"
   solver-name = "gps-cdcl"
   solver-version = 1
