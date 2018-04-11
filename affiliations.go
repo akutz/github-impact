@@ -197,10 +197,6 @@ func supplementWithAffiliates(
 	// Add all of the e-mail addresses from the affiliate looked up
 	// by the user's primary e-mail address.
 	if primryEmail := user.GetEmail(); primryEmail != "" {
-		if _, ok := knownEmails[primryEmail]; !ok {
-			knownEmails[primryEmail] = struct{}{}
-			user.Emails = append(user.Emails, primryEmail)
-		}
 		if a, ok := affiliates[primryEmail]; ok && a.Occurrences == 1 {
 			for _, v := range a.Emails {
 				if _, ok := knownEmails[v]; !ok {

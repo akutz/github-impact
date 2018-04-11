@@ -67,8 +67,12 @@ func updateLocalCache(
 					// been processed.
 					var wg2 sync.WaitGroup
 
-					// Write the user to disk if the user was fetched live.
-					if !config.noFetchUsers {
+					// Write the user to disk if the user was fetched live
+					// or if it might have new e-mail information.
+					if config.ldap ||
+						!config.noFetchUsers ||
+						!config.noFetchAffiliations {
+
 						wg2.Add(1)
 						go func() {
 							defer wg2.Done()

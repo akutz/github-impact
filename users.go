@@ -148,31 +148,51 @@ func loadOrGetUser(
 	githubClient *github.Client,
 	ldapClient ldap.Client,
 	affiliates map[string]*devAffiliation,
-	login string) (user *userWrapper, err error) {
+	login string) (*userWrapper, error) {
 
-	if config.noFetchUsers {
-		// Load the user from the local disk cache.
-		user, err = loadUserFromDisk(login)
-	} else {
-		// Get the user via the GitHub API
-		user, err = getUser(ctx, githubClient, login)
-	}
-
+	// Load the user from the local disk cache.
+	user, exists, err := loadUserFromDisk(login)
 	if err != nil {
 		return nil, err
 	}
 
-	user.Emails = []string{}
+	if !config.noFetchUsers {
+		// Get the user via the GitHub API
+		user2, err := getUser(ctx, githubClient, login)
+		if err != nil {
+			return nil, err
+		}
+		// If the cached user exists then use its e-mails.
+		if exists {
+			user2.Emails = user.Emails
+		}
+		user = user2
+	}
+
+	// Track the known e-mails for the user.
 	knownEmails := map[string]struct{}{}
 
-	supplementWithAffiliates(user, knownEmails, affiliates)
+	// Mark any existing e-mails as known.
+	for _, email := range user.Emails {
+		knownEmails[email] = struct{}{}
+	}
 
+	// If the primary e-mail is not empty then mark it as known
+	// and add it to the list if not already known.
+	if primaryEmail := user.GetEmail(); primaryEmail != "" {
+		if _, ok := knownEmails[primaryEmail]; !ok {
+			knownEmails[primaryEmail] = struct{}{}
+			user.Emails = append(user.Emails, primaryEmail)
+		}
+	}
+
+	supplementWithAffiliates(user, knownEmails, affiliates)
 	if err := supplementWithLDAP(
 		ctx, ldapClient, user, knownEmails); err != nil {
 		return nil, err
 	}
 
-	return
+	return user, nil
 }
 
 func getCachedLogins(
@@ -264,19 +284,25 @@ func fetchMemberLogins(
 	return chanLogins, chanErrs
 }
 
-func loadUserFromDisk(login string) (*userWrapper, error) {
+func loadUserFromDisk(login string) (*userWrapper, bool, error) {
 	filePath := path.Join(config.outputDir, login, "data.json")
+	if ok, err := fileExists(filePath); !ok {
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
 	f, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	defer f.Close()
 	dec := json.NewDecoder(f)
 	var user userWrapper
 	if err := dec.Decode(&user); err != nil {
-		return nil, err
+		return nil, true, err
 	}
-	return &user, nil
+	return &user, true, nil
 }
 
 func getUser(
