@@ -7,10 +7,13 @@ go get -u github.com/akutz/github-impact
 ```
 
 ## Requirements
+
+### The `git` command
 In order to provide information about a user's commit impact, the
 `git` command must be installed. If the `git` command is not detected
 in the path then the `-target-git-dir` flag is not available.
 
+### A GitHub API Key
 The `github-impact` command requires that the environment variable
 `GITHUB_API_KEY` be set to a GitHub API key with the following
 permissions:
@@ -26,6 +29,17 @@ permissions:
 * `repo:status`
 * `repo_deployment`
 * `user:email`
+
+### LDAP credentials
+LDAP may be used to supplement e-mail addresses for GitHub members who
+elect to not share their e-mail address. The flag `-ldap` must be used
+to enable LDAP lookup (as opposed to `-no-fetch` for the other features
+that require remote access). Additionally, credentials for LDAP are
+specified with the environment variables `LDAP_USER` and `LDAP_PASS`.
+
+Please note that when accessing VMware's Active Directory the username
+is `YOUR_USER_NAME@vmware.com`. Additionally, access to VMware's
+Active Directory requires the VPN.
 
 ## All Users
 ```shell
