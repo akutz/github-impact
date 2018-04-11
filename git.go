@@ -12,7 +12,6 @@ import (
 	"path"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -96,11 +95,11 @@ func writeGitLog(
 	// Because searching on a name is fuzzy at best, the name must be at
 	// least eight characters long and include a space to indicate a first
 	// and last name is present.
-	if len(name) >= 8 && strings.Contains(name, " ") {
-		if err := gitChangesets(ctx, login, name, changesets); err != nil {
-			return err
-		}
-	}
+	//if len(name) >= 8 && strings.Contains(name, " ") {
+	//	if err := gitChangesets(ctx, login, name, changesets); err != nil {
+	//		return err
+	//	}
+	//}
 
 	dirPath := path.Join(config.outputDir, login, "commits")
 

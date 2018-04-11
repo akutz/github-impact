@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -73,9 +74,16 @@ func generateReport(
 	chanEntries chan reportEntry,
 	chanErrs chan error) error {
 
+	suffix := ""
+	if len(config.args) > 0 {
+		suffix = fmt.Sprintf("-%s", strings.Join(config.args, "+"))
+	}
+
 	// Create the report.csv file that will receive output in
 	// addition to stdout.
-	csvf, err := os.Create(path.Join(config.outputDir, "report.csv"))
+	csvf, err := os.Create(
+		path.Join(config.outputDir,
+			fmt.Sprintf("report%s.csv", suffix)))
 	if err != nil {
 		return err
 	}
@@ -93,7 +101,9 @@ func generateReport(
 	}
 
 	// Create the report.json file.
-	jsonf, err := os.Create(path.Join(config.outputDir, "report.json"))
+	jsonf, err := os.Create(
+		path.Join(config.outputDir,
+			fmt.Sprintf("report%s.json", suffix)))
 	if err != nil {
 		return err
 	}
