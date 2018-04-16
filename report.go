@@ -3,53 +3,13 @@ package main
 import (
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
-
-type reportEntry struct {
-	Login            string      `json:"login,omitempty"`
-	Name             string      `json:"name,omitempty"`
-	Emails           []string    `json:"emails,omitempty"`
-	Commits          int         `json:"commits,omitempty"`
-	Additions        int         `json:"additions,omitempty"`
-	Deletions        int         `json:"deletions,omitempty"`
-	LatestCommitSHA  string      `json:"latestCommitSHA,omitempty"`
-	LatestCommitDate *time.Time  `json:"latestCommitDate,omitempty"`
-	Issues           issueReport `json:"issues,omitempty"`
-	PullRequests     issueReport `json:"pullRequests,omitempty"`
-}
-
-func (r reportEntry) fields() []string {
-	latestCommitDate := ""
-	if v := r.LatestCommitDate; v != nil {
-		latestCommitDate = v.String()
-	}
-	return []string{
-		r.Login,
-		r.Name,
-		strings.Join(r.Emails, "|"),
-		strconv.Itoa(r.Commits),
-		strconv.Itoa(r.Additions),
-		strconv.Itoa(r.Deletions),
-		r.LatestCommitSHA,
-		latestCommitDate,
-		strconv.Itoa(r.Issues.Created),
-		strconv.Itoa(r.Issues.Assigned),
-		strconv.Itoa(r.Issues.Mentioned),
-		strconv.Itoa(r.PullRequests.Created),
-		strconv.Itoa(r.PullRequests.Assigned),
-		strconv.Itoa(r.PullRequests.Mentioned),
-		strconv.Itoa(r.PullRequests.Merged),
-	}
-}
 
 var csvReportHeader = []string{
 	"login",
@@ -69,68 +29,134 @@ var csvReportHeader = []string{
 	"pullRequestsMerged",
 }
 
-func generateReport(
-	ctx context.Context,
-	chanEntries chan reportEntry,
-	chanErrs chan error) error {
-
-	suffix := ""
-	if len(config.args) > 0 {
-		suffix = fmt.Sprintf("-%s", strings.Join(config.args, "+"))
+func (m member) csvFields(opts options) []string {
+	var (
+		additions              int
+		deletions              int
+		latestCommitSHA        string
+		latestCommitDate       time.Time
+		latestCommitDateString string
+	)
+	for _, c := range m.Commits {
+		if c.AuthorDate.After(latestCommitDate) {
+			latestCommitSHA = c.Short
+			latestCommitDate = c.AuthorDate
+			if opts.config.UTC {
+				latestCommitDate = latestCommitDate.UTC()
+			}
+			//Mon Jan 2 15:04:05 -0700 MST 2006
+			latestCommitDateString = latestCommitDate.Format(
+				"2006-01-02:15:04:05-07")
+		}
+		for _, ce := range c.Changes {
+			additions = additions + ce.Add
+			deletions = deletions + ce.Del
+		}
 	}
 
-	// Create the report.csv file that will receive output in
-	// addition to stdout.
-	csvf, err := os.Create(
-		path.Join(config.outputDir,
-			fmt.Sprintf("report%s.csv", suffix)))
+	return []string{
+		m.Login,
+		m.Name,
+		strings.Join(m.Emails, "|"),
+		strconv.Itoa(len(m.Commits)),
+		strconv.Itoa(additions),
+		strconv.Itoa(deletions),
+		latestCommitSHA,
+		latestCommitDateString,
+		"", //strconv.Itoa(r.Issues.Created),
+		"", //strconv.Itoa(r.Issues.Assigned),
+		"", //strconv.Itoa(r.Issues.Mentioned),
+		"", //strconv.Itoa(r.PullRequests.Created),
+		"", //strconv.Itoa(r.PullRequests.Assigned),
+		"", //strconv.Itoa(r.PullRequests.Mentioned),
+		"", //strconv.Itoa(r.PullRequests.Merged),
+	}
+}
+
+type issueReport struct {
+	Created   int `json:"created,omitempty"`
+	Assigned  int `json:"assigned,omitempty"`
+	Mentioned int `json:"mentioned,omitempty"`
+	Merged    int `json:"merged,omitempty"`
+}
+
+type issueAndPullRequestReport struct {
+	Login        string      `json:"login,omitempty"`
+	Issues       issueReport `json:"issues,omitempty"`
+	PullRequests issueReport `json:"pullRequests,omitempty"`
+}
+
+func (i issueReport) hasIssues() bool {
+	return i.Created > 0 || i.Assigned > 0 || i.Mentioned > 0
+}
+
+func (i issueAndPullRequestReport) hasIssues() bool {
+	return i.Issues.hasIssues() || i.PullRequests.hasIssues()
+}
+
+func writeReport(
+	ctx context.Context, chanMembers chan member, opts options) error {
+
+	var reportName string
+	if args := opts.config.Args; len(args) > 0 {
+		reportName = fmt.Sprintf("report-%s", strings.Join(args, "+"))
+	} else {
+		reportName = "report"
+	}
+
+	// Create the CSV report file and CSV writer for stdout.
+	// An io.Multiwriter is not used because stdout receives all
+	// members, but the report only receives members that have
+	// activity.
+	csvFileName := fmt.Sprintf("%s.csv", reportName)
+	csvFilePath := path.Join(opts.config.OutputDir, csvFileName)
+	csvf, err := os.Create(csvFilePath)
 	if err != nil {
 		return err
 	}
 	defer csvf.Close()
-	csvw := csv.NewWriter(io.MultiWriter(os.Stdout, csvf))
+
+	csvw := csv.NewWriter(csvf)
 	defer csvw.Flush()
 	csvw.Write(csvReportHeader)
-	var csvwMu sync.Mutex
-	writeCSV := func(entry reportEntry) error {
-		csvwMu.Lock()
-		defer csvwMu.Unlock()
-		csvw.Write(entry.fields())
-		csvw.Flush()
-		return csvw.Error()
-	}
-
-	// Create the report.json file.
-	jsonf, err := os.Create(
-		path.Join(config.outputDir,
-			fmt.Sprintf("report%s.json", suffix)))
-	if err != nil {
+	csvw.Flush()
+	if err := csvw.Error(); err != nil {
 		return err
 	}
-	defer jsonf.Close()
-	jsonEnc := json.NewEncoder(jsonf)
-	jsonEnc.SetIndent("", "  ")
-	var jsonMu sync.Mutex
-	writeJSON := func(entry reportEntry) error {
-		jsonMu.Lock()
-		defer jsonMu.Unlock()
-		return jsonEnc.Encode(entry)
+
+	csvo := csv.NewWriter(os.Stdout)
+	defer csvo.Flush()
+	csvo.Write(csvReportHeader)
+	csvo.Flush()
+	if err := csvo.Error(); err != nil {
+		return err
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case err := <-chanErrs:
-			return err
-		case entry, ok := <-chanEntries:
+		case m, ok := <-chanMembers:
 			if !ok {
 				return nil
 			}
-			if err := writeCSV(entry); err != nil {
+
+			fields := m.csvFields(opts)
+			csvo.Write(fields)
+			csvo.Flush()
+			if err := csvo.Error(); err != nil {
 				return err
 			}
-			if err := writeJSON(entry); err != nil {
+
+			// Do not report entries with no commits.
+			if len(m.Commits) == 0 {
+				continue
+			}
+
+			// Encode to CSV
+			csvw.Write(fields)
+			csvw.Flush()
+			if err := csvw.Error(); err != nil {
 				return err
 			}
 		}

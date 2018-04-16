@@ -6,7 +6,10 @@ import (
 )
 
 func TestGetDevelopersAffiliations(t *testing.T) {
-	n, data, err := getDevAffiliations(context.Background())
+
+	opts := options{}
+
+	n, data, err := getDevAffiliates(context.Background(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +49,8 @@ func TestGetDevelopersAffiliations(t *testing.T) {
 
 	t.Log("get affiliates again - no fetch")
 
-	config.noFetchAffiliations = true
-	n, data, err = getDevAffiliations(context.Background())
+	opts.config.NoAffiliates = true
+	n, data, err = getDevAffiliates(context.Background(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}

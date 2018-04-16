@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -33,56 +32,17 @@ type affiliatedCompany struct {
 }
 
 func (a affiliatedCompany) active() bool {
-	return a.Until != nil && a.Until.Before(time.Now())
+	return a.Until == nil || a.Until.Before(time.Now())
 }
 
-func getDevAffiliations(
-	ctx context.Context) (int, map[string]*devAffiliation, error) {
+type devAffiliates map[string]*devAffiliation
 
-	var r io.Reader
-
-	// Unless disabled, download the latest copy of the developer
-	// affiliations file.
-	if !config.noFetchAffiliations {
-		rep, err := http.Get(affiliationsURL)
-		if err != nil {
-			return 0, nil, nil
-		}
-		if rep.StatusCode > 299 {
-			return 0, nil, errors.New(rep.Status)
-		}
-		defer rep.Body.Close()
-		r = rep.Body
-	}
-
-	fileName := fmt.Sprintf(".%s", affiliationsFileName)
-	filePath := path.Join(config.outputDir, fileName)
-
-	// If -no-fetch-affiliations is present then load the affiliations
-	// from the local file. Otherwise setup a tee process to both
-	// update the local file and scan the downloaded content at the
-	// same time.
-	if config.noFetchAffiliations {
-		f, err := os.Open(filePath)
-		if err != nil {
-			return 0, nil, err
-		}
-		defer f.Close()
-		r = f
-	} else {
-		//
-		f, err := os.Create(filePath)
-		if err != nil {
-			return 0, nil, err
-		}
-		defer f.Close()
-		r = io.TeeReader(r, f)
-	}
-
+// decode decodes the provided IO stream into the devAffiliates object
+// and returns the number of unique values.
+func (da devAffiliates) decode(ctx context.Context, r io.Reader) (int, error) {
 	var (
 		n    int
 		scan = bufio.NewScanner(r)
-		data = map[string]*devAffiliation{}
 
 		devRX = regexp.MustCompile(`^([^:]+):\s*(.+)$`)
 		coRX  = regexp.MustCompile(`^\t(.+?)(?:\suntil\s(\d{4}-\d{2}-\d{2}))?$`)
@@ -90,11 +50,11 @@ func getDevAffiliations(
 
 	// Get rid of the leading comment
 	if !scan.Scan() {
-		return 0, nil, io.EOF
+		return 0, io.EOF
 	}
 	// Place cursor on first dev affiliate line
 	if !scan.Scan() {
-		return 0, nil, io.EOF
+		return 0, io.EOF
 	}
 
 	// A cancelled context will cause the loop to return early, but not
@@ -103,18 +63,18 @@ func getDevAffiliations(
 		devLine := scan.Text()
 		devMatch := devRX.FindStringSubmatch(devLine)
 		if len(devMatch) == 0 {
-			return 0, nil, fmt.Errorf(
+			return 0, fmt.Errorf(
 				"error matching affiliate+dev: %s", devLine)
 		}
 
 		var dev *devAffiliation
-		if d, ok := data[devMatch[1]]; ok {
+		if d, ok := da[devMatch[1]]; ok {
 			dev = d
 			dev.Occurrences++
 		} else {
 			n++
 			dev = &devAffiliation{Occurrences: 1, Name: devMatch[1]}
-			data[dev.Name] = dev
+			da[dev.Name] = dev
 		}
 
 		if len(devMatch) > 2 {
@@ -127,14 +87,14 @@ func getDevAffiliations(
 
 		// Add the dev to the data map all of their available e-mail addresses.
 		for i := range dev.Emails {
-			data[dev.Emails[i]] = dev
+			da[dev.Emails[i]] = dev
 		}
 
 		for {
 			// Place the cursor on the first company line for the developer.
 			// If there is no more data then return the data map.
 			if !scan.Scan() {
-				return n, data, nil
+				return n, nil
 			}
 			coLine := scan.Text()
 			coMatch := coRX.FindStringSubmatch(coLine)
@@ -153,7 +113,7 @@ func getDevAffiliations(
 			if len(coMatch) > 2 && coMatch[2] != "" {
 				t, err := time.Parse("2006-01-02", coMatch[2])
 				if err != nil {
-					return 0, nil, err
+					return 0, err
 				}
 				if !t.IsZero() {
 					co.Until = &t
@@ -166,49 +126,78 @@ func getDevAffiliations(
 		}
 	}
 
+	return n, nil
+}
+
+func getDevAffiliates(
+	ctx context.Context, opts options) (int, devAffiliates, error) {
+
+	var r io.Reader
+
+	// Unless disabled, download the latest copy of the developer
+	// affiliations file.
+	if !opts.config.NoAffiliates {
+		rep, err := http.Get(affiliationsURL)
+		if err != nil {
+			return 0, nil, nil
+		}
+		if rep.StatusCode > 299 {
+			return 0, nil, errors.New(rep.Status)
+		}
+		defer rep.Body.Close()
+		r = rep.Body
+	}
+
+	fileName := fmt.Sprintf(".%s", affiliationsFileName)
+	filePath := path.Join(opts.config.OutputDir, fileName)
+
+	// If -no-fetch-affiliations is present then load the affiliations
+	// from the local file. Otherwise setup a tee process to both
+	// update the local file and scan the downloaded content at the
+	// same time.
+	if opts.config.NoAffiliates {
+		// It's okay if the affiliates file does not exist. In that
+		// case just return an empty map.
+		if ok, err := fileExists(filePath); !ok {
+			if err != nil {
+				return 0, nil, err
+			}
+			return 0, nil, nil
+		}
+		f, err := os.Open(filePath)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer f.Close()
+		r = f
+	} else {
+		//
+		f, err := os.Create(filePath)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer f.Close()
+		r = io.TeeReader(r, f)
+	}
+
+	data := devAffiliates{}
+	n, err := data.decode(ctx, r)
+	if err != nil {
+		return n, nil, err
+	}
 	return n, data, nil
 }
 
-func supplementWithAffiliates(
-	user *userWrapper,
-	knownEmails map[string]struct{},
-	affiliates map[string]*devAffiliation) {
+func (m *member) loadFromAffiliates(
+	ctx context.Context, opts options) error {
 
-	login := user.GetLogin()
-
-	// Add all of the e-mail addresses from the affiliate looked up
-	// by the user's name as long as the name is sufficiently unique.
-	if name := user.GetName(); len(name) >= 8 || strings.Contains(name, " ") {
-		if a, ok := affiliates[name]; ok && a.Occurrences == 1 {
-			for _, v := range a.Emails {
-				if _, ok := knownEmails[v]; !ok {
-					knownEmails[v] = struct{}{}
-					user.Emails = append(user.Emails, v)
-					if debug {
-						log.Printf(
-							"affiliate: login=%s, name=%s mail=%s",
-							login, name, v)
-					}
-				}
+	for _, a := range opts.devs {
+		if a.Name == m.Name && a.Occurrences == 1 {
+			for _, email := range a.Emails {
+				m.Emails.append(email)
 			}
+			return nil
 		}
 	}
-
-	// Add all of the e-mail addresses from the affiliate looked up
-	// by the user's primary e-mail address.
-	if primryEmail := user.GetEmail(); primryEmail != "" {
-		if a, ok := affiliates[primryEmail]; ok && a.Occurrences == 1 {
-			for _, v := range a.Emails {
-				if _, ok := knownEmails[v]; !ok {
-					knownEmails[v] = struct{}{}
-					user.Emails = append(user.Emails, v)
-					if debug {
-						log.Printf(
-							"affiliate: login=%s, primryEmail=%s mail=%s",
-							login, primryEmail, v)
-					}
-				}
-			}
-		}
-	}
+	return nil
 }

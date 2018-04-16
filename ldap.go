@@ -5,16 +5,25 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/ldap.v2"
 )
 
-func ldapBind(ctx context.Context, user, pass string) (ldap.Client, error) {
-	client, err := ldap.DialTLS("tcp", config.ldapHost, &tls.Config{
-		ServerName:         strings.Split(config.ldapHost, ":")[0],
-		InsecureSkipVerify: config.ldapInsecureTLS,
-	})
+func ldapBind(
+	ctx context.Context,
+	user, pass string,
+	opts options) (ldap.Client, error) {
+
+	client, err := ldap.DialTLS(
+		"tcp",
+		opts.config.LDAP.Host,
+		&tls.Config{
+			ServerName:         strings.Split(opts.config.LDAP.Host, ":")[0],
+			InsecureSkipVerify: opts.config.LDAP.TLS.Insecure,
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -25,72 +34,82 @@ func ldapBind(ctx context.Context, user, pass string) (ldap.Client, error) {
 	return client, nil
 }
 
-func supplementWithLDAP(
-	ctx context.Context,
-	client ldap.Client,
-	user *userWrapper,
-	knownEmails map[string]struct{}) error {
-
-	if !config.ldap {
-		return nil
+func (m *member) loadFromLDAP(ctx context.Context, opts options) error {
+	var filter string
+	if m.LDAPLogin == "" {
+		filter = fmt.Sprintf(`(&(objectClass=person)(displayName=%s))`, m.Name)
+	} else {
+		filter = fmt.Sprintf(`(sAMAccountName=%s)`, m.LDAPLogin)
 	}
-
-	login := user.GetLogin()
-	name := user.GetName()
 
 	req := &ldap.SearchRequest{
-		BaseDN:     "DC=vmware,DC=com",
-		Attributes: []string{"mail"},
-		Scope:      ldap.ScopeWholeSubtree,
+		BaseDN: "DC=vmware,DC=com",
+		Attributes: []string{
+			"mail",
+			"sAMAccountName",
+			"distinguishedName",
+			"whenCreated",
+			"whenChanged",
+		},
+		Scope:  ldap.ScopeWholeSubtree,
+		Filter: filter,
+	}
+	if opts.config.Debug {
+		log.Printf("%+v", req)
 	}
 
-	// Search by login ID
-	req.Filter = fmt.Sprintf(
-		`(&(objectClass=person)(samAccountName=%s))`, login)
-	rep, err := client.Search(req)
+	rep, err := opts.ldap.Search(req)
 	if err != nil {
 		return err
 	}
-	if len(rep.Entries) == 1 {
-		if v := rep.Entries[0].GetAttributeValue("mail"); v != "" {
-			if _, ok := knownEmails[v]; !ok {
-				knownEmails[v] = struct{}{}
-				user.Emails = append(user.Emails, v)
-				if debug {
-					log.Printf(
-						"ldap: login=%[1]s, sAMAccountName=%[1]s mail=%[2]s",
-						login, v)
+	if len(rep.Entries) != 1 {
+		patt := fmt.Sprintf(`(?i)^.+@.*%s.*\..+$`, opts.config.MemberOrg)
+		for _, email := range m.Emails {
+			if ok, err := regexp.MatchString(patt, email); !ok {
+				if err != nil {
+					return err
 				}
+				continue
 			}
-			return nil
+			req.Filter = fmt.Sprintf(`(mail=%s)`, email)
+			if rep, err = opts.ldap.Search(req); err != nil {
+				return err
+			}
+			break
 		}
 	}
 
-	if name == "" {
+	if len(rep.Entries) != 1 {
 		return nil
 	}
 
-	// Search by display name
-	req.Filter = fmt.Sprintf(
-		`(&(objectClass=person)(displayName=%s))`, name)
-	rep, err = client.Search(req)
-	if err != nil {
-		return err
+	entry := rep.Entries[0]
+	if opts.config.Debug {
+		log.Printf("%+v", entry)
 	}
-	if len(rep.Entries) == 1 {
-		if v := rep.Entries[0].GetAttributeValue("mail"); v != "" {
-			if _, ok := knownEmails[v]; !ok {
-				knownEmails[v] = struct{}{}
-				user.Emails = append(user.Emails, v)
-				if debug {
-					log.Printf(
-						"ldap: login=%s, displayName=%s mail=%s",
-						login, name, v)
-				}
+
+	m.LDAPLogin = entry.GetAttributeValue("sAMAccountName")
+	m.Emails.append(entry.GetAttributeValue("mail"))
+
+	var employed dateRange
+	if v := entry.GetAttributeValue("whenCreated"); v != "" {
+		t, err := time.Parse("20060102150405.0Z", v)
+		if err != nil {
+			return err
+		}
+		employed.From = &t
+	}
+	dn := entry.GetAttributeValue("distinguishedName")
+	if strings.Contains(dn, "OU=Closed_Hold") {
+		if v := entry.GetAttributeValue("whenChanged"); v != "" {
+			t, err := time.Parse("20060102150405.0Z", v)
+			if err != nil {
+				return err
 			}
-			return nil
+			employed.Until = &t
 		}
 	}
+	m.Employed.append(employed)
 
 	return nil
 }

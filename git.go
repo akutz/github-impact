@@ -3,20 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
-	"path"
 	"regexp"
 	"strconv"
 	"time"
 )
-
-// chanGit controls the number of concurrent git commands
-var chanGit chan struct{}
 
 type changesetEntry struct {
 	Add  int    `json:"add"`
@@ -31,133 +25,78 @@ type changeset struct {
 	AuthorName  string           `json:"authorName,omitempty"`
 	AuthorEmail string           `json:"authorEmail,omitempty"`
 	AuthorDate  time.Time        `json:"authorDate"`
-	Additions   int              `json:"additions"`
-	Deletions   int              `json:"deletions"`
 	Changes     []changesetEntry `json:"changes"`
 }
 
-type changesetReport struct {
-	AuthorName       string    `json:"authorName,omitempty"`
-	AuthorEmail      string    `json:"authorEmail,omitempty"`
-	LatestCommitSHA  string    `json:"latestCommitSHA"`
-	LatestCommitDate time.Time `json:"latestCommitDate"`
-	Commits          int       `json:"commits"`
-	Additions        int       `json:"additions"`
-	Deletions        int       `json:"deletions"`
+func (o options) waitForGit() {
+	o.chanGit <- struct{}{}
+}
+func (o options) doneWithGit() {
+	<-o.chanGit
 }
 
-func git(args ...string) (io.Reader, func(), func() error, error) {
-	chanGit <- struct{}{}
+func git(
+	opts options,
+	args ...string) (io.Reader, func(), func() error, error) {
+
+	opts.waitForGit()
 
 	args = append([]string{
 		"--no-pager",
 		"--git-dir",
-		config.targetGitDir,
+		opts.config.Git.TargetDir,
 	}, args...)
 	cmd := exec.Command("git", args...)
 
-	if debug {
+	if opts.config.Debug {
 		log.Printf("%v\n", cmd.Args)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		<-chanGit
+		opts.doneWithGit()
 		return nil, nil, nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		<-chanGit
+		opts.doneWithGit()
 		return nil, nil, nil, err
 	}
 
-	return stdout, func() { <-chanGit }, cmd.Wait, nil
+	return stdout, opts.doneWithGit, cmd.Wait, nil
 }
 
-func writeGitLog(
-	ctx context.Context,
-	user *userWrapper) error {
+// gitLog gets the changesets for the user's available e-mail addresses.
+func (m *member) gitLog(ctx context.Context, opts options) error {
+	changesets := map[string]changeset{}
+	knownChangesets := map[string]struct{}{}
 
-	var (
-		login      = user.GetLogin()
-		name       = user.GetName()
-		email      = user.GetEmail()
-		changesets = map[string]changeset{}
-	)
+	// Add the existing changesets to the list so dupes don't get added.
+	for _, cs := range m.Commits {
+		knownChangesets[cs.Long] = struct{}{}
+	}
 
-	// Get the changesets for the user with information starting
-	// with the most specific to the least specific.
-	for _, email := range user.Emails {
-		if err := gitChangesets(ctx, login, email, changesets); err != nil {
+	for _, email := range m.Emails {
+		if err := m.findChangesets(
+			ctx, email, knownChangesets, changesets, opts); err != nil {
 			return err
 		}
 	}
-
-	// Because searching on a name is fuzzy at best, the name must be at
-	// least eight characters long and include a space to indicate a first
-	// and last name is present.
-	//if len(name) >= 8 && strings.Contains(name, " ") {
-	//	if err := gitChangesets(ctx, login, name, changesets); err != nil {
-	//		return err
-	//	}
-	//}
-
-	dirPath := path.Join(config.outputDir, login, "commits")
-
-	// Remove stale data
-	os.RemoveAll(dirPath)
-
-	if len(changesets) == 0 {
-		return nil
+	for _, commit := range changesets {
+		m.Commits = append(m.Commits, commit)
 	}
-
-	os.MkdirAll(dirPath, 0755)
-
-	report := changesetReport{
-		AuthorName:  name,
-		AuthorEmail: email,
-	}
-	for _, cur := range changesets {
-		report.Commits++
-		report.Additions = report.Additions + cur.Additions
-		report.Deletions = report.Deletions + cur.Deletions
-		if v := cur.AuthorDate; v.After(report.LatestCommitDate) {
-			report.LatestCommitSHA = cur.Long
-			report.LatestCommitDate = v
-		}
-
-		fileName := fmt.Sprintf("%s.json", cur.Short)
-		filePath := path.Join(dirPath, fileName)
-
-		f, err := os.Create(filePath)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-
-		enc := json.NewEncoder(f)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(cur); err != nil {
-			return err
-		}
-	}
-
-	f, err := os.Create(path.Join(dirPath, "data.json"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	return enc.Encode(report)
+	return nil
 }
 
-// gitChangesets returns the changesets for an author
-func gitChangesets(
+// findChangesets finds the changesets for the provided author.
+func (m member) findChangesets(
 	ctx context.Context,
-	login, author string,
-	changesets map[string]changeset) error {
+	author string,
+	knownChangesets map[string]struct{},
+	changesets map[string]changeset,
+	opts options) error {
 
 	r, done, wait, err := git(
+		opts,
 		"log",
 		"--author",
 		author,
@@ -204,7 +143,7 @@ func gitChangesets(
 		scan.Scan()
 		epoch, _ := strconv.ParseInt(scan.Text(), 10, 64)
 		cur.AuthorDate = time.Unix(epoch, 0)
-		if config.utc {
+		if opts.config.UTC {
 			cur.AuthorDate = cur.AuthorDate.UTC()
 		}
 
@@ -231,19 +170,17 @@ func gitChangesets(
 		// At this point the line is an additions/deletions line
 		for scan.Text() != "" {
 			var entry changesetEntry
-			m := addDelRX.FindStringSubmatch(scan.Text())
-			if len(m) != 4 {
+			match := addDelRX.FindStringSubmatch(scan.Text())
+			if len(match) != 4 {
 				return fmt.Errorf(
 					"error matching changeset add/del line: "+
 						"login=%s, author=%s, line=%s, changeset=%+v",
-					login, author, scan.Text(), cur)
+					m.Login, author, scan.Text(), cur)
 			}
-			entry.Add, _ = strconv.Atoi(m[1])
-			entry.Del, _ = strconv.Atoi(m[2])
-			entry.Path = m[3]
+			entry.Add, _ = strconv.Atoi(match[1])
+			entry.Del, _ = strconv.Atoi(match[2])
+			entry.Path = match[3]
 
-			cur.Additions = cur.Additions + entry.Add
-			cur.Deletions = cur.Deletions + entry.Del
 			cur.Changes = append(cur.Changes, entry)
 
 			if !scan.Scan() {
@@ -251,7 +188,29 @@ func gitChangesets(
 			}
 		}
 
-		changesets[cur.Long] = cur
+		if _, ok := knownChangesets[cur.Long]; ok {
+			// Ignore existing commit
+			continue
+		}
+
+		// Only count the commit if it occurred during the time which
+		// the member was employed with the source organization.
+		var validCommit bool
+		for _, e := range m.Employed {
+			if e.From != nil && cur.AuthorDate.After(*e.From) {
+				if e.Until == nil || cur.AuthorDate.Before(*e.Until) {
+					validCommit = true
+					break
+				}
+			}
+		}
+
+		if validCommit {
+			changesets[cur.Long] = cur
+		} else if opts.config.Debug {
+			log.Printf("ignoring commit: sha=%s, date=%s, author=%s <%s>",
+				cur.Short, cur.AuthorDate, cur.AuthorName, cur.AuthorEmail)
+		}
 	}
 
 	return wait()
